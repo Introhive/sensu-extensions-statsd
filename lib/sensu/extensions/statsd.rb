@@ -59,10 +59,9 @@ module Sensu
       def post_init
         @flush_timers = []
         @data = EM::Queue.new
-        @gauges = Hash.new { |h, k| h[k] = 0 }
-        @counters = Hash.new { |h, k| h[k] = 0 }
-        @timers = Hash.new { |h, k| h[k] = [] }
-        @gauges_status = Hash.new { |h, k| h[k] = 0 }
+        @gauges_list = []
+        @counters_list = []
+        @timers_list = []
         @metrics = []
         setup_flush_timers
         setup_parser
@@ -80,21 +79,8 @@ module Sensu
       end
 
       private
-
-      def clean(hash, delete = false, reset = false)
-        if delete
-          hash.delete_if do |_key, value|
-            value == 0 || value == []
-          end
-        end
-        if reset
-          hash.each do |key, value|
-            hash[key] = (value.is_a?(Array) ? [] : 0)
-          end
-        end
-      end
-
       def add_metric(*args) # rubocop:disable Metrics/MethodLength
+        tags = args.pop
         value = args.pop
         path = []
         path << @settings[:client][:name] if options[:add_client_prefix]
@@ -107,27 +93,27 @@ module Sensu
         else
           @logger.debug('adding statsd metric', path: path,
                                                 value: value)
-          @metrics << [path, value, Time.now.to_i].join(' ')
+          graphite_metric = [path, value, Time.now.to_i]
+          unless tags.nil? || tags.empty?
+            statsd_tags_for_influxdb = tags.collect {|k,v| k.to_s + ':' + v.to_s}.join(',')
+            graphite_metric << "\"#{statsd_tags_for_influxdb}\""
+          end
+          @metrics << graphite_metric.join(' ')
         end
       end
 
       def flush!
-        @gauges.each do |name, value|
-          unless value == 0 && options[:delete_gauges] && @gauges_status[name] == 0
-            add_metric('gauges', name, value)
-            @gauges_status[name] = 0
-          end
+        @gauges_list.each do |metric|
+          add_metric('gauges', metric[:name], metric[:value], metric[:tags])
         end
-        clean(@gauges, options[:delete_gauges], options[:reset_gauges])
-        clean(@gauges_status, true, false)
-        @counters.each do |name, value|
-          unless value == 0 && options[:delete_counters]
-            add_metric('counters', name, value.to_i)
-          end
+        @gauges_list = []
+        @counters_list.each do |metric|
+          add_metric('counters', metric[:name], metric[:value].to_i, metric[:tags])
         end
-        clean(@counters, options[:delete_counters], options[:reset_counters])
-        @timers.each do |name, values|
-          next if values.empty? && options[:delete_timers]
+        @counters_list = []
+        @timers_list.each do |metric|
+          values = metric[:values]
+          next if values.empty?
           values.sort!
           length = values.length
           min = values.first || 0
@@ -144,12 +130,12 @@ module Sensu
             valid_values.each { |v| sum += v }
             mean = sum / valid_values.length
           end
-          add_metric('timers', name, 'lower', min)
-          add_metric('timers', name, 'mean', mean)
-          add_metric('timers', name, 'upper', max)
-          add_metric('timers', name, "upper_#{percentile}", max_at_threshold)
+          add_metric('timers', metric[:name], 'lower', min, metric[:tags])
+          add_metric('timers', metric[:name], 'mean', mean, metric[:tags])
+          add_metric('timers', metric[:name], 'upper', max, metric[:tags])
+          add_metric('timers', metric[:name], "upper_#{percentile}", max_at_threshold, metric[:tags])
         end
-        clean(@timers, options[:delete_timers], options[:reset_timers])
+        @timers_list = []
         @logger.debug('flushed statsd metrics')
       end
 
@@ -159,28 +145,53 @@ module Sensu
         end
       end
 
+      def create_or_fetch_matching_tags(list, name, tags, data_format)
+        data_matched = list.find { |data| data[:tags] == tags && data[:name] == name }
+        if data_matched.nil?
+          data_matched = data_format
+          data_matched[:tags] = tags
+          list << data_matched
+        end
+        data_matched
+      end
+
       # TODO: come back and refactor me
       def setup_parser # rubocop:disable Metrics/MethodLength
         parser = proc do |data|
           begin
-            nv, type, raw_sample = data.strip.split('|')
+            nv, type, *extras = data.strip.split('|')
             name, raw_value = nv.split(':')
             value = Float(raw_value)
-            sample = Float(raw_sample ? raw_sample.split('@').last : 1)
+            sample = Float(1)
+            statsd_tags = {}
+            extras.each do |param|
+              case param
+              when /^@/
+                sample = Float(param.split('@').last)
+              when /^#/
+                statsd_tags = param.split('#').last.split(',')
+                statsd_tags = statsd_tags.reduce({}) { |all_tags, datagram_tag|
+                                k,v = datagram_tag.split(':')
+                                all_tags[k] = v
+                                all_tags
+                              }
+              end
+            end
             case type
             when 'g'
-              if raw_value.start_with?('+')
-                @gauges[name] += value
-              elsif raw_value.start_with?('-')
-                @gauges[name] -= value.abs
-              else
-                @gauges[name] = value
-              end
-              @gauges_status[name] = 1
+              new_gauge = { name: name, value: 0, tags: {} }
+              matched_gauge = create_or_fetch_matching_tags(@gauges_list, name, statsd_tags, new_gauge)
+              matched_gauge[:value] = value
             when /^c/, 'm'
-              @counters[name] += value * (1 / sample)
+              new_counter = { name: name, value: 0, tags: {} }
+              value = value * (1 / sample)
+              matched_counter = create_or_fetch_matching_tags(@counters_list, name, statsd_tags, new_counter)
+              matched_counter[:value] += value
             when 'ms', 'h', 't'
-              @timers[name] << value * (1 / sample)
+              new_timer = { name: name, values: [], tags: {} }
+              value = value * (1 / sample)
+              matched_timer = create_or_fetch_matching_tags(@timers_list, name, statsd_tags, new_timer)
+              matched_timer[:values] << value
             end
           rescue => error
             @logger.error('statsd parser error', error: error.to_s)
