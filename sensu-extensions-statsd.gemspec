@@ -1,6 +1,6 @@
 Gem::Specification.new do |spec|
   spec.name          = 'sensu-extensions-statsd'
-  spec.version       = '2.0.1'
+  spec.version       = '2.0.2'
   spec.authors       = ['Sensu-Extensions and contributors']
   spec.email         = ['<sensu-users@googlegroups.com>']
 
