@@ -1,6 +1,6 @@
 Gem::Specification.new do |spec|
   spec.name          = 'sensu-extensions-statsd'
-  spec.version       = '2.0.1'
+  spec.version       = '2.0.4'
   spec.authors       = ['Sensu-Extensions and contributors']
   spec.email         = ['<sensu-users@googlegroups.com>']
 
@@ -13,7 +13,7 @@ Gem::Specification.new do |spec|
 
   spec.add_dependency 'sensu-extension'
 
-  spec.add_development_dependency 'bundler', '~> 1.6'
+  spec.add_development_dependency 'bundler', '>= 2.2.10'
   spec.add_development_dependency 'github_changelog_generator'
   spec.add_development_dependency 'rake'
   spec.add_development_dependency 'rspec'
